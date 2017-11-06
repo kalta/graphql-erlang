@@ -1,6 +1,9 @@
 -module(graphql).
 
 -include("graphql_internal.hrl").
+-include("graphql_schema.hrl").
+
+
 
 %% GraphQL Documents
 -export([
@@ -111,7 +114,16 @@ execute(Ctx, AST) ->
 -spec insert_schema_definition(schema_definition()) -> ok | {error, Reason}
   when Reason :: term().
 insert_schema_definition(Defn) ->
-    graphql_schema:load(Defn).
+    insert_schema_definition(?DEFAULT_NAMESPACE, Defn).
+
+
+%% @doc insert_schema_definition/1 loads a schema definition into the Graph Schema
+%% @end
+-spec insert_schema_definition(namespace(), schema_definition()) -> ok | {error, Reason}
+                                  when Reason :: term().
+insert_schema_definition(Namespace, Defn) ->
+    graphql_schema:load(Namespace, Defn).
+
 
 %% STUB for now
 -spec validate_schema() -> ok | {error, any()}.

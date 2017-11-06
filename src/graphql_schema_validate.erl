@@ -2,13 +2,13 @@
 
 -include("graphql_schema.hrl").
 
--export([x/0]).
+-export([x/1]).
 
--spec x() -> ok.
-x() ->
-    Objects = graphql_schema:all(),
+-spec x(graphql:namespace()) -> ok.
+x(Namespace) ->
+    Objects = graphql_schema:all(Namespace),
     try
-        [x(Obj) || Obj <- Objects],
+        [x(Namespace, Obj) || Obj <- Objects],
         ok
     catch
         throw:Error ->
@@ -20,8 +20,8 @@ x() ->
             exit(Error)
     end.
 
-x(Obj) ->
-    try validate(Obj) of
+x(Namespace, Obj) ->
+    try validate(Namespace, Obj) of
         ok -> ok
     catch
         throw:{invalid, Reason} ->
@@ -29,61 +29,61 @@ x(Obj) ->
     end.
 
 
-validate(#scalar_type {}) -> ok;
-validate(#root_schema {} = X) -> root_schema(X);
-validate(#object_type {} = X) -> object_type(X);
-validate(#enum_type {} = X) -> enum_type(X);
-validate(#interface_type {} = X) -> interface_type(X);
-validate(#union_type {} = X) -> union_type(X);
-validate(#input_object_type {} = X) -> input_object_type(X).
+validate(_Namespace, #scalar_type {}) -> ok;
+validate(Namespace, #root_schema {} = X) -> root_schema(Namespace, X);
+validate(Namespace, #object_type {} = X) -> object_type(Namespace, X);
+validate(_Namespace, #enum_type {} = X) -> enum_type(X);
+validate(Namespace, #interface_type {} = X) -> interface_type(Namespace, X);
+validate(Namespace, #union_type {} = X) -> union_type(Namespace, X);
+validate(Namespace, #input_object_type {} = X) -> input_object_type(Namespace, X).
 
 enum_type(#enum_type {}) ->
     %% TODO: Validate values
     ok.
 
-input_object_type(#input_object_type { fields = FS }) ->
-    all(fun schema_input_type_arg/1, maps:to_list(FS)),
+input_object_type(Namespace, #input_object_type { fields = FS }) ->
+    all(Namespace, fun schema_input_type_arg/2, maps:to_list(FS)),
     ok.
 
-union_type(#union_type { types = Types }) ->
-    all(fun is_union_type/1, Types),
+union_type(Namespace, #union_type { types = Types }) ->
+    all(Namespace, fun is_union_type/2, Types),
     ok.
 
-interface_type(#interface_type { fields= FS }) ->
-    all(fun schema_field/1, maps:to_list(FS)),
+interface_type(Namespace, #interface_type { fields= FS }) ->
+    all(Namespace, fun schema_field/2, maps:to_list(FS)),
     ok.
 
-object_type(#object_type {
+object_type(Namespace, #object_type {
 	fields = FS,
 	interfaces = IFaces} = Obj) ->
-    all(fun is_interface/1, IFaces),
-    all(fun(IF) -> implements(lookup(IF), Obj) end, IFaces),
-    all(fun schema_field/1, maps:to_list(FS)),
+    all(Namespace, fun is_interface/2, IFaces),
+    all(Namespace, fun(IF) -> implements(lookup(Namespace, IF), Obj) end, IFaces),
+    all(Namespace, fun schema_field/2, maps:to_list(FS)),
     ok.
 
-root_schema(#root_schema {
+root_schema(Namespace, #root_schema {
 	query = Q,
 	mutation = M,
 	subscription = S,
 	interfaces = IFaces }) ->
-    undefined_object(Q),
-    undefined_object(M),
-    undefined_object(S),
-    all(fun is_interface/1, IFaces),
+    undefined_object(Namespace, Q),
+    undefined_object(Namespace, M),
+    undefined_object(Namespace, S),
+    all(Namespace, fun is_interface/2, IFaces),
     ok.
     
-schema_field({_, #schema_field { ty = Ty, args = Args }}) ->
-    all(fun schema_input_type_arg/1, maps:to_list(Args)),
-    type(Ty),
+schema_field(Namespace, {_, #schema_field { ty = Ty, args = Args }}) ->
+    all(Namespace, fun schema_input_type_arg/2, maps:to_list(Args)),
+    type(Namespace, Ty),
     ok.
 
-schema_input_type_arg({_, #schema_arg { ty = Ty }}) ->
+schema_input_type_arg(Namespace, {_, #schema_arg { ty = Ty }}) ->
     %% TODO: Default check!
-    input_type(Ty),
+    input_type(Namespace, Ty),
     ok.
 
-undefined_object(undefined) -> ok;
-undefined_object(Obj) -> is_object(Obj).
+undefined_object(_Namespace, undefined) -> ok;
+undefined_object(Namespace, Obj) -> is_object(Namespace, Obj).
 
 implements(#interface_type { fields = IFFields } = IFace,
            #object_type { fields = ObjFields }) ->
@@ -115,28 +115,28 @@ implements_field_check([{IK, _} | _] = IL, [{OK, _} | OS]) when IK > OK ->
 implements_field_check([{IK, _} | _], [{OK, _} | _]) when IK < OK ->
     {error, {field_not_found_in_object, IK}}.
     
-is_interface(IFace) ->
-    case lookup(IFace) of
+is_interface(Namespace, IFace) ->
+    case lookup(Namespace, IFace) of
         #interface_type{} -> ok;
         _ -> err({not_interface, IFace})
     end.
 
-is_object(Obj) ->
-    case lookup(Obj) of
+is_object(Namespace, Obj) ->
+    case lookup(Namespace, Obj) of
         #object_type{} -> ok;
         _ -> err({not_object, Obj})
     end.
 
-is_union_type(Obj) ->
-    case lookup(Obj) of
+is_union_type(Namespace, Obj) ->
+    case lookup(Namespace, Obj) of
         #object_type{} -> ok;
         _ -> err({not_union_type, Obj})
     end.
 
-type({non_null, T}) -> type(T);
-type({list, T}) -> type(T);
-type(X) when is_binary(X) ->
-    case lookup(X) of
+type(Namespace, {non_null, T}) -> type(Namespace, T);
+type(Namespace, {list, T}) -> type(Namespace, T);
+type(Namespace, X) when is_binary(X) ->
+    case lookup(Namespace, X) of
         #input_object_type {} ->
             err({invalid_output_type, X});
 
@@ -144,10 +144,10 @@ type(X) when is_binary(X) ->
             ok
     end.
 
-input_type({non_null, T}) -> input_type(T);
-input_type({list, T}) -> input_type(T);
-input_type(X) when is_binary(X) ->
-    case lookup(X) of
+input_type(Namespace, {non_null, T}) -> input_type(Namespace, T);
+input_type(Namespace, {list, T}) -> input_type(Namespace, T);
+input_type(Namespace, X) when is_binary(X) ->
+    case lookup(Namespace, X) of
         #input_object_type {} -> ok;
         #enum_type {} -> ok;
         #scalar_type {} -> ok;
@@ -155,13 +155,13 @@ input_type(X) when is_binary(X) ->
             err({invalid_input_type, X})
     end.
 
-all(_F, []) -> ok;
-all(F, [E|Es]) ->
-    ok = F(E),
-    all(F, Es).
+all(_Namespace, _F, []) -> ok;
+all(Namespace, F, [E|Es]) ->
+    ok = F(Namespace, E),
+    all(Namespace, F, Es).
 
-lookup(Key) ->
-    case graphql_schema:lookup(Key) of
+lookup(Namespace, Key) ->
+    case graphql_schema:lookup(Namespace, Key) of
         not_found -> err({not_found, Key});
         X -> X
     end.

@@ -5,14 +5,14 @@
 -include("graphql_schema.hrl").
 -include("graphql_internal.hrl").
 
--export([start_link/0, reset/0]).
+-export([start_link/0, reset/1]).
 -export([
-         all/0,
-         insert/1, insert/2,
-         load/1,
-         get/1,
-         lookup/1,
-         lookup_enum_type/1,
+         all/1,
+         insert/2, insert/3,
+         load/2,
+         get/2,
+         lookup/2,
+         lookup_enum_type/2,
          lookup_interface_implementors/1
         ]).
 -export([resolve_root_type/2]).
@@ -28,28 +28,31 @@
 
 -record(state, {}).
 
+-type namespace() :: term().
+
+
 %% -- API ----------------------------
 -spec start_link() -> any().
 start_link() ->
     Res = gen_server:start_link({local, ?MODULE}, ?MODULE, [], []),
-    reset(),
+    reset(?DEFAULT_NAMESPACE),
     Res.
 
--spec reset() -> ok.
-reset() ->
-    ok = gen_server:call(?MODULE, reset),
-    ok = graphql_introspection:inject(),
-    ok = graphql_builtins:standard_types_inject(),
+-spec reset(graphql:namespace()) -> ok.
+reset(Namespace) ->
+    ok = gen_server:call(?MODULE, {reset, Namespace}),
+    ok = graphql_introspection:inject(Namespace),
+    ok = graphql_builtins:standard_types_inject(Namespace),
     ok.
 
--spec insert(any()) -> true.
-insert(S) -> insert(S, #{ canonicalize => true }).
+-spec insert(graphql:namespace(), any()) -> true.
+insert(Namespace, S) -> insert(Namespace, S, #{ canonicalize => true }).
 
--spec insert(any(), any()) -> true | false.
-insert(S, #{ canonicalize := true }) ->
+-spec insert(namespace(), any(), any()) -> true | false.
+insert(Namespace, S, #{ canonicalize := true }) ->
     try graphql_schema_canonicalize:x(S) of
         Rec ->
-            case gen_server:call(?MODULE, {insert, Rec}) of
+            case gen_server:call(?MODULE, {insert, Namespace, Rec}) of
                 true -> ok;
                 false ->
                     Identify = fun({_, #{ id := ID }}) -> ID end,
@@ -62,45 +65,46 @@ insert(S, #{ canonicalize := true }) ->
               [{Class,Reason}, erlang:get_stacktrace()]),
             {error, {schema_canonicalize, {Class, Reason}}}
     end;
-insert(S, #{}) ->
-    gen_server:call(?MODULE, {insert, S}).
+insert(Namespace, S, #{}) ->
+    gen_server:call(?MODULE, {insert, Namespace, S}).
 
 
--spec load(any()) -> ok | {error, Reason}
+-spec load(graphql:namespace(), any()) -> ok | {error, Reason}
   when Reason :: term().
-load(S) ->
+load(Namespace, S) ->
     try graphql_schema_canonicalize:x(S) of
         #root_schema { query = Q } = Rec ->
             ok = graphql_introspection:augment_root(Q),
-            insert_new_(Rec);
+            insert_new_(Namespace, Rec);
         Rec ->
-            insert_new_(Rec)
+            insert_new_(Namespace, Rec)
     catch
         Class:Reason ->
             {error, {schema_canonicalize, {Class, Reason}}}
     end.
 
-insert_new_(Rec) ->
-    case gen_server:call(?MODULE, {insert_new, Rec}) of
+insert_new_(Namespace, Rec) ->
+    case gen_server:call(?MODULE, {insert_new, Namespace, Rec}) of
         true -> ok;
         false -> {error, already_exists, id(Rec)}
     end.
 
--spec all() -> [any()].
-all() ->
-    ets:match_object(?OBJECTS, '_').
+-spec all(graphql:namespace()) -> [any()].
+all(Namespace) ->
+    [S || {N, S} <- ets:tab2list(?OBJECTS), N==Namespace].
+    %ets:match_object(?OBJECTS, '_').
 
--spec get(binary() | 'ROOT') -> schema_object().
-get(ID) ->
-    case ets:lookup(?OBJECTS, ID) of
-       [S] -> S;
+-spec get(graphql:namespace(), binary() | 'ROOT') -> schema_object().
+get(Namespace, ID) ->
+    case ets:lookup(?OBJECTS, {Namespace, ID}) of
+       [{_, S}] -> S;
        _ -> exit(schema_not_found)
     end.
 
--spec lookup_enum_type(binary()) -> binary() | not_found.
-lookup_enum_type(EnumValue) ->
-    try ets:lookup_element(?ENUMS, EnumValue, 3) of
-        Ty -> ?MODULE:get(Ty)
+-spec lookup_enum_type(graphql:namespace(), binary()) -> binary() | not_found.
+lookup_enum_type(Namespace, EnumValue) ->
+    try ets:lookup_element(?ENUMS, {Namespace, EnumValue}, 3) of
+        Ty -> ?MODULE:get(Namespace, Ty)
     catch
         error:badarg ->
             not_found
@@ -115,15 +119,15 @@ lookup_enum_type(EnumValue) ->
 -spec lookup_interface_implementors(binary()) -> [binary()].
 lookup_interface_implementors(IFaceID) ->
     QH = qlc:q([Obj#object_type.id
-                || Obj <- ets:table(?OBJECTS),
+                || {_, Obj} <- ets:table(?OBJECTS),
                    element(1, Obj) == object_type,
                    lists:member(IFaceID, Obj#object_type.interfaces)]),
     qlc:e(QH).
 
--spec lookup(binary() | 'ROOT') -> schema_object() | not_found.
-lookup(ID) ->
-    case ets:lookup(?OBJECTS, ID) of
-       [S] -> S;
+-spec lookup(namespace(), binary() | 'ROOT') -> schema_object() | not_found.
+lookup(Namespace, ID) ->
+    case ets:lookup(?OBJECTS, {Namespace, ID}) of
+       [{_, S}] -> S;
        _ -> not_found
     end.
 
@@ -150,7 +154,8 @@ init([]) ->
            {keypos, 1}]),
     _Tab = ets:new(?OBJECTS,
         [named_table, protected, {read_concurrency, true}, set,
-         {keypos, #object_type.id}]),
+         {keypos, 1}]),
+         %{keypos, #object_type.id}]),
     {ok, #state{}}.
 
 -spec handle_cast(any(), S) -> {noreply, S}
@@ -161,33 +166,43 @@ handle_cast(_Msg, State) -> {noreply, State}.
   when
     S :: #state{},
     M :: term().
-handle_call({insert, X}, _From, State) ->
-    case determine_table(X) of
+handle_call({insert, Namespace, X}, _From, State) ->
+    case determine_table(Namespace, X) of
         {error, unknown} ->
             {reply, {error, {schema, X}}, State};
-        {enum, Tab, Enum} ->
-            ets:insert(Tab, X),
-            insert_enum(Enum, X),
+        {enum, Tab, Enum, Id} ->
+            ets:insert(Tab, {Id, X}),
+            insert_enum(Namespace, Enum, X),
             {reply, true, State};
-        Tab ->
-            {reply, ets:insert(Tab, X), State}
+        {obj, Tab, Id} ->
+            {reply, ets:insert(Tab, {Id, X}), State}
     end;
-handle_call({insert_new, X}, _From, State) ->
-    case determine_table(X) of
+handle_call({insert_new, Namespace, X}, _From, State) ->
+    case determine_table(Namespace, X) of
         {error, unknown} ->
             {reply, {error, {schema, X}}, State};
-        {enum, Tab, Enum} ->
-            case ets:insert_new(Tab, X) of
+        {enum, Tab, Enum, Id} ->
+            case ets:insert_new(Tab, {Id, X}) of
                 false ->
                    {reply, false, State};
                 true ->
-                   insert_enum(Enum, X),
+                   insert_enum(Namespace, Enum, X),
                    {reply, true, State}
             end;
-        Tab ->
-            {reply, ets:insert_new(Tab, X), State}
+        {obj, Tab, Id} ->
+            {reply, ets:insert_new(Tab, {Id, X}), State}
     end;
-handle_call(reset, _From, State) ->
+handle_call({reset, Namespace}, _From, State) ->
+    lists:foreach(
+        fun(Tuple) ->
+            case element(1, Tuple) of
+                {N, _} =Id when N==Namespace ->
+                    ets:delete_object(?OBJECTS, Id);
+                _ ->
+                    ok
+            end
+        end,
+        all(Namespace)),
     true = ets:delete_all_objects(?OBJECTS),
     {reply, ok, State};
 handle_call(_Msg, _From, State) ->
@@ -206,20 +221,20 @@ code_change(_OldVsn, State, _Aux) -> {ok, State}.
 
 %% -- INTERNAL FUNCTIONS -------------------------
 
-%% determine_table/1 figures out the table an object belongs to
-determine_table(#root_schema{}) -> ?OBJECTS;
-determine_table(#object_type{}) -> ?OBJECTS;
-determine_table(#enum_type{}) -> {enum, ?OBJECTS, ?ENUMS};
-determine_table(#interface_type{}) -> ?OBJECTS;
-determine_table(#scalar_type{}) -> ?OBJECTS;
-determine_table(#input_object_type{}) -> ?OBJECTS;
-determine_table(#union_type{}) -> ?OBJECTS;
-determine_table(_) -> {error, unknown}.
+%% determine_table/1 figures out the table and key an object belongs to
+determine_table(Namespace, #root_schema{id=Id}) -> {obj, ?OBJECTS, {Namespace, Id}};
+determine_table(Namespace, #object_type{id=Id}) -> {obj, ?OBJECTS, {Namespace, Id}};
+determine_table(Namespace, #enum_type{id=Id}) -> {enum, ?OBJECTS, ?ENUMS, {Namespace, Id}};
+determine_table(Namespace, #interface_type{id=Id}) -> {obj, ?OBJECTS, {Namespace, Id}};
+determine_table(Namespace, #scalar_type{id=Id}) -> {obj, ?OBJECTS, {Namespace, Id}};
+determine_table(Namespace, #input_object_type{id=Id}) -> {obj, ?OBJECTS, {Namespace, Id}};
+determine_table(Namespace, #union_type{id=Id}) -> {obj, ?OBJECTS, {Namespace, Id}};
+determine_table(_Namespace, _) -> {error, unknown}.
 
 %% insert enum values
-insert_enum(Tab, #enum_type { id = ID, values = VMap }) ->
+insert_enum(Tab, Namespace, #enum_type { id = ID, values = VMap }) ->
     Vals = maps:to_list(VMap),
     [begin
-        ets:insert(Tab, {Key, Value, ID})
+        ets:insert(Tab, {{Namespace, Key}, Value, {Namespace, ID}})
       end || {Value, #enum_value { val = Key }} <- Vals],
     ok.

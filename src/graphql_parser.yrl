@@ -88,7 +88,7 @@ Type -> NamedType : '$1'.
 Type -> ListType : '$1'.
 Type -> NonNullType : '$1'.
 
-NamedType -> Name : g_ty('$1').
+NamedType -> Name : g_ty('$1', ''$2').
 
 ListType -> '[' Type ']' : {list, '$2'}.
 
@@ -441,20 +441,20 @@ g_query({query, _L} = Q) -> Q.
 g_mutation({mutation, _L} = Mut) -> Mut.
 g_subscription({subscription, _L} = Sub) -> Sub.
 
-g_ty({name, _, <<"String">>}) -> scalar_lookup(<<"String">>);
-g_ty({name, _, <<"string">>}) -> scalar_lookup(<<"String">>);
-g_ty({name, _, <<"Int">>}) -> scalar_lookup(<<"Int">>);
-g_ty({name, _, <<"int">>}) -> scalar_lookup(<<"Int">>);
-g_ty({name, _, <<"float">>}) -> scalar_lookup(<<"Float">>);
-g_ty({name, _, <<"Float">>}) -> scalar_lookup(<<"Float">>);
-g_ty({name, _, <<"bool">>}) -> scalar_lookup(<<"Bool">>);
-g_ty({name, _, <<"Bool">>}) -> scalar_lookup(<<"Bool">>);
-g_ty({name, _, <<"boolean">>}) -> scalar_lookup(<<"Bool">>);
-g_ty({name, _, <<"Boolean">>}) -> scalar_lookup(<<"Bool">>);
-g_ty({name, _, <<"id">>}) -> scalar_lookup(<<"ID">>);
-g_ty({name, _, <<"Id">>}) -> scalar_lookup(<<"ID">>);
-g_ty({name, _, <<"ID">>}) -> scalar_lookup(<<"ID">>);
-g_ty({name, _, _} = N) -> N.
+g_ty(Namespace, {name, _, <<"String">>}) -> scalar_lookup(Namespace, <<"String">>);
+g_ty(Namespace, {name, _, <<"string">>}) -> scalar_lookup(Namespace, <<"String">>);
+g_ty(Namespace, {name, _, <<"Int">>}) -> scalar_lookup(Namespace, <<"Int">>);
+g_ty(Namespace, {name, _, <<"int">>}) -> scalar_lookup(Namespace, <<"Int">>);
+g_ty(Namespace, {name, _, <<"float">>}) -> scalar_lookup(Namespace, <<"Float">>);
+g_ty(Namespace, {name, _, <<"Float">>}) -> scalar_lookup(Namespace, <<"Float">>);
+g_ty(Namespace, {name, _, <<"bool">>}) -> scalar_lookup(Namespace, <<"Bool">>);
+g_ty(Namespace, {name, _, <<"Bool">>}) -> scalar_lookup(Namespace, <<"Bool">>);
+g_ty(Namespace, {name, _, <<"boolean">>}) -> scalar_lookup(Namespace, <<"Bool">>);
+g_ty(Namespace, {name, _, <<"Boolean">>}) -> scalar_lookup(Namespace, <<"Bool">>);
+g_ty(Namespace, {name, _, <<"id">>}) -> scalar_lookup(Namespace, <<"ID">>);
+g_ty(Namespace, {name, _, <<"Id">>}) -> scalar_lookup(Namespace, <<"ID">>);
+g_ty(Namespace, {name, _, <<"ID">>}) -> scalar_lookup(Namespace, <<"ID">>);
+g_ty(_Namespace, {name, _, _} = N) -> N.
 
 g_enum({name, _Line, N}) -> N.
 
@@ -472,6 +472,6 @@ g_input_object(KVPairs) ->
 keyword({A, Line}) when is_atom(A) ->
     {name, Line, atom_to_binary(A, utf8)}.
 
-scalar_lookup(Name) ->
-  #scalar_type{} = Ty = graphql_schema:get(Name),
+scalar_lookup(Namespace, Name) ->
+  #scalar_type{} = Ty = graphql_schema:get(Namespace, Name),
   Ty.

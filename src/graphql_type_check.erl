@@ -41,7 +41,7 @@
 -include("graphql_internal.hrl").
 -include("graphql_schema.hrl").
 
--export([x/1, x_params/3]).
+-export([x/2, x_params/4]).
 -export([err_msg/1]).
 
 %% -- TOP LEVEL TYPE CHECK CODE -------------------------------
@@ -53,31 +53,31 @@
 %% their types as we type check other things.
 %%
 %% Type checking then proceeds one Clause at a time.
--spec x(graphql:ast()) -> {ok, #{ atom() => any()}}.
-x(Doc) ->
-    x(#{}, Doc).
+-spec x(graphql:namespace(), graphql:ast()) -> {ok, #{ atom() => any()}}.
+x(Namespace, Doc) ->
+    x(Namespace, #{}, Doc).
 
-x(Ctx, {document, Clauses}) ->
-   type_check(Ctx, [document], Clauses).
+x(Namespace, Ctx, {document, Clauses}) ->
+   type_check(Namespace, Ctx, [document], Clauses).
 
-type_check(Ctx, Path, Clauses) ->
+type_check(Namespace, Ctx, Path, Clauses) ->
    {Fragments, _Rest} = lists:partition(
                           fun (#frag{}) -> true; (_) -> false end,
                           Clauses),
 
    FragCtx = Ctx#{ fragenv => mk_fragenv(Fragments) },
-   NewClauses = clauses(FragCtx, Path, Clauses),
+   NewClauses = clauses(Namespace, FragCtx, Path, Clauses),
    {ok, #{
        fun_env => graphql_elaborate:mk_funenv(NewClauses),
        ast => {document, NewClauses}
    }}.
 
-clauses(_Ctx, _Path, []) ->
+clauses(_Namespace, _Ctx, _Path, []) ->
     [];
-clauses(Ctx, Path, [#frag{} = Frag | Next]) ->
-    [frag(Ctx, Path, Frag) | clauses(Ctx, Path, Next)];
-clauses(Ctx, Path, [#op{} = Op | Next]) ->
-    [op(Ctx, Path, Op) | clauses(Ctx, Path, Next)].
+clauses(Namespace, Ctx, Path, [#frag{} = Frag | Next]) ->
+    [frag(Namespace, Ctx, Path, Frag) | clauses(Namespace, Ctx, Path, Next)];
+clauses(Namespace, Ctx, Path, [#op{} = Op | Next]) ->
+    [op(Namespace, Ctx, Path, Op) | clauses(Namespace, Ctx, Path, Next)].
 
 %% -- TYPE CHECK OF PARAMETER ENVS ------------------
 
@@ -111,24 +111,24 @@ get_operation(FunEnv, OpName, _Params) ->
 %% This is the entry-point when checking parameters for an already parsed,
 %% type checked and internalized query. It serves to verify that a requested
 %% operation and its parameters matches the types in the operation referenced
--spec x_params(any(), any(), any()) -> graphql:param_context().
-x_params(FunEnv, OpName, Params) ->
+-spec x_params(graphql:namespace(), any(), any(), any()) -> graphql:param_context().
+x_params(Namespace, FunEnv, OpName, Params) ->
     case get_operation(FunEnv, OpName, Params) of
         undefined ->
             #{};
         not_found ->
             err([], {operation_not_found, OpName});
         TyVarEnv ->
-            tc_params([OpName], TyVarEnv, Params)
+            tc_params(Namespace, [OpName], TyVarEnv, Params)
     end.
 
 %% Parameter checking has positive polarity, so we fold over
 %% the type var environment from the schema and verify that each
 %% type is valid
-tc_params(Path, TyVarEnv, InitialParams) ->
+tc_params(Namespace, Path, TyVarEnv, InitialParams) ->
     F =
       fun(K, V0, PS) ->
-        case tc_param(Path, K, V0, maps:get(K, PS, not_found)) of
+        case tc_param(Namespace, Path, K, V0, maps:get(K, PS, not_found)) of
             V0 -> PS;
             V1 -> PS#{ K => V1 }
         end
@@ -139,13 +139,13 @@ tc_params(Path, TyVarEnv, InitialParams) ->
 %% If a given parameter is not given, and there is a default, we can supply
 %% the default value in some cases. The spec requires special handling of
 %% null values, which are handled here.
-tc_param(Path, K, #vardef { ty = {non_null, _}, default = null }, not_found) ->
+tc_param(_Namespace, Path, K, #vardef { ty = {non_null, _}, default = null }, not_found) ->
     err([K | Path], missing_non_null_param);
-tc_param(Path, K, #vardef { default = Default,
+tc_param(Namespace, Path, K, #vardef { default = Default,
                             ty = Ty }, not_found) ->
-    coerce_default_param([K | Path], Ty, Default);
-tc_param(Path, K, #vardef { ty = Ty }, Val) ->
-    check_param([K | Path], Ty, Val).
+    coerce_default_param(Namespace, [K | Path], Ty, Default);
+tc_param(Namespace, Path, K, #vardef { ty = Ty }, Val) ->
+    check_param(Namespace, [K | Path], Ty, Val).
 
 %% When checking params, the top level has been elaborated by the
 %% elaborator, but the levels under it has not. So we have a case where
@@ -153,19 +153,19 @@ tc_param(Path, K, #vardef { ty = Ty }, Val) ->
 %%
 %% This function case-splits on different types of positive polarity and
 %% calls out to the correct helper-function
-check_param(Path, {non_null, _}, null) -> err(Path, non_null);
-check_param(Path, {non_null, Ty}, V) -> check_param(Path, Ty, V);
-check_param(_Path, _Ty, null) -> null;
-check_param(Path, {list, T}, L) when is_list(L) ->
+check_param(_Namespace, Path, {non_null, _}, null) -> err(Path, non_null);
+check_param(Namespace, Path, {non_null, Ty}, V) -> check_param(Namespace, Path, Ty, V);
+check_param(_Namespace, _Path, _Ty, null) -> null;
+check_param(Namespace, Path, {list, T}, L) when is_list(L) ->
     %% Build a dummy structure to match the recursor. Unwrap this
     %% structure before replacing the list parameter.
-    [check_param(Path, T, X) || X <- L];
-check_param(Path, #scalar_type{} = STy, V) -> non_polar_coerce(Path, STy, V);
-check_param(Path, #enum_type{} = ETy, {enum, V}) when is_binary(V) ->
-    check_param(Path, ETy, V);
-check_param(Path, #enum_type { id = Ty }, V) when is_binary(V) ->
+    [check_param(Namespace, Path, T, X) || X <- L];
+check_param(_Namespace, Path, #scalar_type{} = STy, V) -> non_polar_coerce(Path, STy, V);
+check_param(Namespace, Path, #enum_type{} = ETy, {enum, V}) when is_binary(V) ->
+    check_param(Namespace, Path, ETy, V);
+check_param(Namespace, Path, #enum_type { id = Ty }, V) when is_binary(V) ->
     %% Determine the type of any enum term, and then coerce it
-    case graphql_schema:lookup_enum_type(V) of
+    case graphql_schema:lookup_enum_type(Namespace, V) of
         #enum_type { id = Ty } = ETy ->
             non_polar_coerce(Path, ETy, V);
         not_found ->
@@ -173,30 +173,30 @@ check_param(Path, #enum_type { id = Ty }, V) when is_binary(V) ->
         OtherTy ->
             err(Path, {param_mismatch, {enum, Ty, OtherTy}})
     end;
-check_param(Path, #input_object_type{} = IOType, Obj) when is_map(Obj) ->
+check_param(Namespace, Path, #input_object_type{} = IOType, Obj) when is_map(Obj) ->
     %% When an object comes in through JSON for example, then the input object
     %% will be a map which is already unique in its fields. To handle this, turn
     %% the object into the same form as the one we use on query documents and pass
     %% it on. Note that the code will create a map later on once the input has been
     %% uniqueness-checked.
-    check_param(Path, IOType, {input_object, maps:to_list(Obj)});
-check_param(Path, #input_object_type{} = IOType, {input_object, KVPairs}) ->
-    check_input_object(Path, IOType, {input_object, KVPairs});
+    check_param(Namespace, Path, IOType, {input_object, maps:to_list(Obj)});
+check_param(Namespace, Path, #input_object_type{} = IOType, {input_object, KVPairs}) ->
+    check_input_object(Namespace, Path, IOType, {input_object, KVPairs});
 %% The following expands un-elaborated (nested) types
-check_param(Path, Ty, V) when is_binary(Ty) ->
-    case graphql_schema:lookup(Ty) of
+check_param(Namespace, Path, Ty, V) when is_binary(Ty) ->
+    case graphql_schema:lookup(Namespace, Ty) of
         #scalar_type {} = ScalarTy -> non_polar_coerce(Path, ScalarTy, V);
-        #input_object_type {} = IOType -> check_input_object(Path, IOType, V);
-        #enum_type {} = Enum -> check_param(Path, Enum, V);
+        #input_object_type {} = IOType -> check_input_object(Namespace, Path, IOType, V);
+        #enum_type {} = Enum -> check_param(Namespace, Path, Enum, V);
         _ ->
             err(Path, {not_input_type, Ty, V})
     end;
 %% Everything else are errors
-check_param(Path, Ty, V) ->
+check_param(_Namespace, Path, Ty, V) ->
     err(Path, {param_mismatch, Ty, V}).
 
-coerce_default_param(Path, Ty, Default) ->
-    try check_param(Path, Ty, Default) of
+coerce_default_param(Namespace, Path, Ty, Default) ->
+    try check_param(Namespace, Path, Ty, Default) of
         Result -> Result
     catch
         Class:Err ->
@@ -209,20 +209,20 @@ coerce_default_param(Path, Ty, Default) ->
     end.
 
 %% Input objects are first coerced. Then they are checked.
-check_input_object(Path, #input_object_type{ fields = Fields }, Obj) ->
+check_input_object(Namespace, Path, #input_object_type{ fields = Fields }, Obj) ->
     Coerced = coerce_input_object(Path, Obj),
-    check_input_object_fields(Path, maps:to_list(Fields), Coerced, #{}).
+    check_input_object_fields(Namespace, Path, maps:to_list(Fields), Coerced, #{}).
 
 %% Input objects are in positive polarity, so the schema's fields are used
 %% to verify that every field is present, and that there are no excess fields
 %% As we process fields in the object, we remove them so we can check that
 %% there are no more fields in the end.
-check_input_object_fields(Path, [], Obj, Result) ->
+check_input_object_fields(_Namespace, Path, [], Obj, Result) ->
     case maps:size(Obj) of
         0 -> Result;
         K when K > 0 -> err(Path, {excess_fields_in_object, Obj})
     end;
-check_input_object_fields(Path,
+check_input_object_fields(Namespace, Path,
                           [{Name, #schema_arg { ty = Ty,
                                                 default = Default }} | Next],
                           Obj,
@@ -233,12 +233,12 @@ check_input_object_fields(Path,
                              {non_null, _} when Default == null ->
                                  err([Name | Path], missing_non_null_param);
                              _ ->
-                                 coerce_default_param(Path, Ty, Default)
+                                 coerce_default_param(Namespace, Path, Ty, Default)
                          end;
                      V ->
-                         check_param([Name | Path], Ty, V)
+                         check_param(Namespace, [Name | Path], Ty, V)
                  end,
-    check_input_object_fields(Path,
+    check_input_object_fields(Namespace, Path,
                               Next,
                               maps:remove(Name, Obj),
                               Result#{ Name => CoercedVal }).
@@ -277,9 +277,9 @@ mk_fragenv(Frags) ->
        || #frag { id = ID } = Frg <- Frags]).
 
 %% Type check a fragment
-frag(Ctx, Path, #frag { schema = ScopeTy,
+frag(Namespace, Ctx, Path, #frag { schema = ScopeTy,
                         selection_set = SSet} = Frag) ->
-    Frag#frag { selection_set = sset(Ctx, Path, ScopeTy, SSet) }.
+    Frag#frag { selection_set = sset(Namespace, Ctx, Path, ScopeTy, SSet) }.
 
 %% -- OPERATIONS -------------------------------
 
@@ -290,14 +290,14 @@ op_unique_varenv(VDefs) ->
     graphql_ast:uniq(NamedVars).
 
 %% Type check an operation.
-op(Ctx, Path, #op { id = ID,
+op(Namespace, Ctx, Path, #op { id = ID,
                     schema = ScopeTy,
                     vardefs = VDefs,
                     selection_set = SSet} = Op) ->
     case op_unique_varenv(VDefs) of
         ok ->
             VarEnv = graphql_elaborate:mk_varenv(VDefs),
-            CheckedSSet = sset(Ctx#{ varenv => VarEnv },
+            CheckedSSet = sset(Namespace, Ctx#{ varenv => VarEnv },
                                [ID | Path], ScopeTy, SSet),
             Op#op { selection_set = CheckedSSet };
         {not_unique, Var} ->
@@ -307,8 +307,8 @@ op(Ctx, Path, #op { id = ID,
 %% -- SELECTION SETS ------------------------------------
 
 %% Type check a selection set by recursing into each field in the selection
-sset(Ctx, Path, Scope, SSet) ->
-    [field(Ctx, Path, Scope, S) || S <- SSet].
+sset(Namespace, Ctx, Path, Scope, SSet) ->
+    [field(Namespace, Ctx, Path, Scope, S) || S <- SSet].
 
 %% Fields are either fragment spreads, inline fragments, introspection
 %% queries or true field entries. Split on the variant of field and
@@ -323,7 +323,7 @@ sset(Ctx, Path, Scope, SSet) ->
 %% Since fields have negative polarity, we only consider type checking
 %% of the fields which the client requested. Every other field is
 %% ignored.
-field(#{ fragenv := FE } = Ctx, Path, ScopeTy, #frag_spread { id = ID, directives = Ds } = FSpread) ->
+field(Namespace, #{ fragenv := FE } = Ctx, Path, ScopeTy, #frag_spread { id = ID, directives = Ds } = FSpread) ->
     Name = graphql_ast:name(ID),
     case maps:get(Name, FE, not_found) of
         not_found ->
@@ -333,40 +333,40 @@ field(#{ fragenv := FE } = Ctx, Path, ScopeTy, #frag_spread { id = ID, directive
             %% You can always include a fragspread, as long as it exists
             %% It may be slightly illegal in a given context but this just
             %% means the system will ignore the fragment on execution
-            FSpread#frag_spread { directives = directives(Ctx, Path, Ds) }
+            FSpread#frag_spread { directives = directives(Namespace, Ctx, Path, Ds) }
     end;
-field(Ctx, Path, Scope, #frag { id = '...',
+field(Namespace, Ctx, Path, Scope, #frag { id = '...',
                                 schema = InnerScope,
                                 selection_set = SSet,
                                 directives = Ds} = InlineFrag) ->
     ok = fragment_embed(['...' | Path], InnerScope, Scope),
     InlineFrag#frag {
-        directives = directives(Ctx, [InlineFrag | Path], Ds),
-        selection_set = sset(Ctx, [InlineFrag | Path], InnerScope, SSet)
+        directives = directives(Namespace, Ctx, [InlineFrag | Path], Ds),
+        selection_set = sset(Namespace, Ctx, [InlineFrag | Path], InnerScope, SSet)
     };
-field(Ctx, Path, _Scope, #field { schema = {introspection, typename}, directives = Ds } = F) ->
-    F#field { directives = directives(Ctx, [F | Path], Ds)};
-field(Ctx, Path, _Scope,
+field(Namespace, Ctx, Path, _Scope, #field { schema = {introspection, typename}, directives = Ds } = F) ->
+    F#field { directives = directives(Namespace, Ctx, [F | Path], Ds)};
+field(Namespace, Ctx, Path, _Scope,
       #field {
          args = Args,
          selection_set = SSet,
          directives = Ds,
          schema = #schema_field { args = SArgs, ty = InnerScope }} = F) ->
-    F#field { args = args(Ctx, [F | Path], Args, SArgs),
-              directives = directives(Ctx, [F | Path], Ds),
-              selection_set = sset(Ctx, [F | Path], InnerScope, SSet) }.
+    F#field { args = args(Namespace, Ctx, [F | Path], Args, SArgs),
+              directives = directives(Namespace, Ctx, [F | Path], Ds),
+              selection_set = sset(Namespace, Ctx, [F | Path], InnerScope, SSet) }.
 
 %% -- DIRECTIVES --------------------------------
 
 %% Type check directives. These can take arguments, so type checking
 %% these amounts to type checking the arguments inside the directive.
-directives(Ctx, Path, Ds) ->
-    [directive(Ctx, Path, D) || D <- Ds].
+directives(Namespace, Ctx, Path, Ds) ->
+    [directive(Namespace, Ctx, Path, D) || D <- Ds].
 
-directive(Ctx, Path,
+directive(Namespace, Ctx, Path,
           #directive { args = Args,
                        schema = #directive_type { args = SArgs }} = D) ->
-    D#directive { args = args(Ctx, [D | Path], Args, SArgs) }.
+    D#directive { args = args(Namespace, Ctx, [D | Path], Args, SArgs) }.
 
 %% -- ARGS -------------------------------------
 
@@ -376,36 +376,36 @@ directive(Ctx, Path,
 %%
 %% Since arguments have positive polarity, they are checked according
 %% to the schema arguments.
-args(Ctx, Path, Args, Schema) ->
+args(Namespace, Ctx, Path, Args, Schema) ->
     NamedArgs = [{graphql_ast:name(K), V} || {K, V} <- Args],
     case graphql_ast:uniq(NamedArgs) of
         ok ->
           SchemaArgs = maps:to_list(Schema),
-          args(Ctx, Path, NamedArgs, SchemaArgs, []);
+          args(Namespace, Ctx, Path, NamedArgs, SchemaArgs, []);
         {not_unique, X} ->
             err(Path, {not_unique, X})
     end.
 
 %% The meat of the argument checker. Walk over each schema arg and
 %% verify it type checks according to the type checking rules.
-args(_Ctx, _Path, [], [], Acc) -> Acc;
-args(_Ctx, Path, [_|_] = Args, [], _Acc) ->
+args(_Namespace, _Ctx, _Path, [], [], Acc) -> Acc;
+args(_Namespace, _Ctx, Path, [_|_] = Args, [], _Acc) ->
     err(Path, {excess_args, Args});
-args(Ctx, Path, Args, [{Name, #schema_arg { ty = STy }} = SArg | Next], Acc) ->
+args(Namespace, Ctx, Path, Args, [{Name, #schema_arg { ty = STy }} = SArg | Next], Acc) ->
     case take_arg(Args, SArg) of
         {error, Reason} ->
             err([Name | Path], Reason);
         {ok, {_, #{ type := Ty, value := Val}} = A, NextArgs} ->
             SchemaType =
-                case graphql_elaborate:type(STy) of
+                case graphql_elaborate:type(Namespace, STy) of
                     {error, Reason} -> exit(Reason);
                     {_Polarity, SchemaTypeRsult} -> SchemaTypeRsult
                 end,
-            case judge(Ctx, [Name | Path], Val, SchemaType) of
+            case judge(Namespace, Ctx, [Name | Path], Val, SchemaType) of
                 Val ->
-                    args(Ctx, Path, NextArgs, Next, [A | Acc]);
+                    args(Namespace, Ctx, Path, NextArgs, Next, [A | Acc]);
                 RVal ->
-                    args(Ctx, Path, NextArgs, Next, [{Name, {Ty, RVal}} | Acc])
+                    args(Namespace, Ctx, Path, NextArgs, Next, [{Name, {Ty, RVal}} | Acc])
             end
     end.
 
@@ -564,31 +564,31 @@ type_embed(_DTy, _STy) ->
     no.
 
 %% Judge a list of values with the same type.
-judge_list(_Ctx, _Path, [], _Type, _K) ->
+judge_list(_Namespace, _Ctx, _Path, [], _Type, _K) ->
     [];
-judge_list(Ctx, Path, [V|Vs], Type, K) ->
-    R = judge(Ctx, [K|Path], V, Type),
-    [R | judge_list(Ctx, Path, Vs, Type, K+1)].
+judge_list(Namespace, Ctx, Path, [V|Vs], Type, K) ->
+    R = judge(Namespace, Ctx, [K|Path], V, Type),
+    [R | judge_list(Namespace, Ctx, Path, Vs, Type, K+1)].
 
 %% Judge a type and a value. Used to verify a type judgement of the
 %% form 'a : T' for a value 'a' and a type 'T'. Analysis has shown that
 %% it is most efficient to make the inversion analysis work on the value
 %% from the document first and then make the inversion analysis on the schema-type.
-judge(Ctx, Path, {name, _, N}, SType) ->
-    judge(Ctx, Path, N, SType);
-judge(Ctx, Path, Value, {non_null, InnerSType} = SType) ->
+judge(Namespace, Ctx, Path, {name, _, N}, SType) ->
+    judge(Namespace, Ctx, Path, N, SType);
+judge(Namespace, Ctx, Path, Value, {non_null, InnerSType} = SType) ->
     case Value of
         null ->
             err(Path, {type_mismatch,
                        #{ document => Value, schema => SType }});
         _Valid ->
-            judge(Ctx, Path, Value, InnerSType)
+            judge(Namespace, Ctx, Path, Value, InnerSType)
     end;
-judge(_Ctx, _Path, null, _SType) ->
+judge(_Namespace, _Ctx, _Path, null, _SType) ->
     %% If a value is null, and we don't have a non-null case,
     %% then the value is valid
     null;
-judge(#{ varenv := VE }, Path, {var, ID}, SType) ->
+judge(_Namespace, #{ varenv := VE }, Path, {var, ID}, SType) ->
     Var = graphql_ast:name(ID),
     case maps:get(Var, VE, not_found) of
         not_found -> err(Path, {unbound_variable, Var});
@@ -602,17 +602,17 @@ judge(#{ varenv := VE }, Path, {var, ID}, SType) ->
                                   schema => SType }})
             end
     end;
-judge(Ctx, Path, Values, SType) when is_list(Values) ->
+judge(Namespace, Ctx, Path, Values, SType) when is_list(Values) ->
     case SType of
         {list, InnerType} ->
-            judge_list(Ctx, Path, Values, InnerType, 0)
+            judge_list(Namespace, Ctx, Path, Values, InnerType, 0)
     end;
-judge(Ctx, Path, Value, {list, _} = SType) ->
+judge(Namespace, Ctx, Path, Value, {list, _} = SType) ->
     %% If the value is not of list-type, but we expect a list,
     %% then hoist the value into a singleton list and recurse
-    judge(Ctx, Path, [Value], SType);
-judge(_Ctx, Path, {enum, N}, SType) ->
-    case graphql_schema:lookup_enum_type(N) of
+    judge(Namespace, Ctx, Path, [Value], SType);
+judge(Namespace, _Ctx, Path, {enum, N}, SType) ->
+    case graphql_schema:lookup_enum_type(Namespace, N) of
         not_found ->
             err(Path, {unknown_enum, N});
         SType ->
@@ -622,24 +622,24 @@ judge(_Ctx, Path, {enum, N}, SType) ->
                        #{ document => Other,
                           schema => SType }})
     end;
-judge(_Ctx, Path, {input_object, _} = InputObj, SType) ->
+judge(Namespace, _Ctx, Path, {input_object, _} = InputObj, SType) ->
     case SType of
         #input_object_type{} = IOType ->
             Coerced = coerce_input_object(Path, InputObj),
-            check_input_object(Path, IOType, Coerced);
+            check_input_object(Namespace, Path, IOType, Coerced);
         _OtherType ->
             err(Path, {type_mismatch, #{ document => InputObj, schema => SType }})
     end;
-judge(_Ctx, Path, Value, #scalar_type{} = SType) ->
+judge(_Namespace, _Ctx, Path, Value, #scalar_type{} = SType) ->
     non_polar_coerce(Path, SType, Value);
-judge(_Ctx, Path, String, #enum_type{}) when is_binary(String) ->
+judge(_Namespace, _Ctx, Path, String, #enum_type{}) when is_binary(String) ->
     %% The spec (Oct 2016, section 3.1.5) says that this is not allowed, unless
     %% given as a parameter. In this case, it is not given as a parameter, but
     %% is expanded in as a string in a query document. Reject.
     err(Path, enum_string_literal);
-judge(_Ctx, Path, Value, #enum_type{} = EType) ->
+judge(_Namespace, _Ctx, Path, Value, #enum_type{} = EType) ->
     non_polar_coerce(Path, EType, Value);
-judge(_Ctx, Path, Value, Unknown) ->
+judge(_Namespace, _Ctx, Path, Value, Unknown) ->
     err(Path, {type_mismatch,
                #{ document => Value, schema => Unknown }}).
 

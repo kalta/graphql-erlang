@@ -2,17 +2,17 @@
 
 -include("graphql_schema.hrl").
 
--export([dump/1]).
+-export([dump/2]).
 
--spec dump(string()) -> ok.
-dump(FName) ->
-    Graph = x(),
+-spec dump(graphql:namespace(), string()) -> ok.
+dump(Namespace, FName) ->
+    Graph = x(Namespace),
     file:write_file(FName, Graph).
 
-x() ->
+x(Namespace) ->
     H = header(),
     F = footer(),
-    Body = body(),
+    Body = body(Namespace),
     [H, Body, F].
 
 footer() -> "}\n".
@@ -30,8 +30,8 @@ header() ->
      "  nodesep=0.3;",
      "  remincross=true;"]).
 
-body() ->
-    Entries = graphql_schema:all(),
+body(Namespace) ->
+    Entries = graphql_schema:all(Namespace),
     Map = maps:from_list([{id(E), E} || E <- Entries]),
     [
       [format(entry(E, Map)) || E <- Entries],

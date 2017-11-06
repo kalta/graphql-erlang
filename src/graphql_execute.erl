@@ -449,7 +449,8 @@ complete_value(Path, Ctx, Ty, Fields, {ok, Value}) when is_binary(Ty) ->
     error_logger:warning_msg(
       "Canary: Type lookup during value completion for: ~p~n",
       [Ty]),
-    SchemaType = graphql_schema:get(Ty),
+    #{namespace:=Namespace} = Ctx,
+    SchemaType = graphql_schema:get(Namespace, Ty),
     complete_value(Path, Ctx, SchemaType, Fields, {ok, Value});
 complete_value(Path, #{ defer_target := Upstream } = Ctx,
                {non_null, InnerTy}, Fields, Result) ->
@@ -485,14 +486,15 @@ complete_value(Path, Ctx, {list, InnerTy}, Fields, {ok, Value}) ->
     complete_value_list(Path, Ctx, InnerTy, Fields, Value);
 complete_value(Path, _Ctx, #scalar_type { id = ID, resolve_module = RM }, _Fields, {ok, Value}) ->
     complete_value_scalar(Path, ID, RM, Value);
-complete_value(Path, _Ctx, #enum_type { id = ID,
+complete_value(Path, Ctx, #enum_type { id = ID,
                                         resolve_module = RM},
                _Fields, {ok, Value}) ->
     case complete_value_scalar(Path, ID, RM, Value) of
         {ok, null, Errors} ->
             {ok, null, Errors};
         {ok, Result, Errors} ->
-            case graphql_schema:lookup_enum_type(Result) of
+            #{namespace:=Namespace} = Ctx,
+            case graphql_schema:lookup_enum_type(Namespace, Result) of
                 #enum_type { id = ID } ->
                     {ok, Result, Errors};
                 #enum_type {} ->
@@ -513,19 +515,20 @@ complete_value(Path, _Ctx, _Ty, _Fields, {error, Reason}) ->
 
 %% Complete an abstract value
 complete_value_abstract(Path, Ctx, Resolver, Fields, {ok, Value}) ->
-    case resolve_abstract_type(Resolver, Value) of
+    #{namespace:=Namespace} = Ctx,
+    case resolve_abstract_type(Namespace, Resolver, Value) of
         {ok, ResolvedType} ->
             complete_value(Path, Ctx, ResolvedType, Fields, {ok, Value});
         {error, Reason} ->
             null(Path, Reason)
     end.
 
-resolve_abstract_type(Module, Value) when is_atom(Module) ->
-    resolve_abstract_type(fun Module:execute/1, Value);
-resolve_abstract_type(Resolver, Value) when is_function(Resolver, 1) ->
+resolve_abstract_type(Namespace, Module, Value) when is_atom(Module) ->
+    resolve_abstract_type(Namespace, fun Module:execute/1, Value);
+resolve_abstract_type(Namespace, Resolver, Value) when is_function(Resolver, 1) ->
     try Resolver(Value) of
         {ok, Ty} ->
-            Obj = #object_type{} = graphql_schema:get(binarize(Ty)),
+            Obj = #object_type{} = graphql_schema:get(Namespace, binarize(Ty)),
             {ok, Obj};
         {error, Reason} ->
             {error, {type_resolver_error, Reason}}
@@ -851,7 +854,8 @@ value(Ctx, Ty, Val) ->
         #enum_type {} ->
             Val;
         Bin when is_binary(Bin) ->
-            LoadedTy = graphql_schema:get(Bin),
+            Namespace = maps:get(namespace, Ctx, ?DEFAULT_NAMESPACE),
+            LoadedTy = graphql_schema:get(Namespace, Bin),
             value(Ctx, LoadedTy, Val)
     end.
 
